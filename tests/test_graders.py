@@ -159,6 +159,58 @@ def test_graders_are_deterministic():
     assert len(set(scores)) == 1, f"Grading is non-deterministic: {scores}"
 
 
+# ── Task 4 grading ────────────────────────────────────────────────────
+
+def test_task4_perfect_answer():
+    _, gt = create_database()
+    t4 = gt["task4"]
+    cats = ", ".join(t4["negative_margin_categories"])
+    answer = (
+        f"Found {t4['discrepancy_count']} orders with discrepancies, "
+        f"averaging {t4['avg_discrepancy_pct']}% off. "
+        f"{t4['negative_margin_count']} categories have negative margins: {cats}."
+    )
+    score, _ = grade(4, answer, gt)
+    assert score >= 0.7, f"Task 4 perfect answer scored only {score}"
+
+
+def test_task4_empty():
+    _, gt = create_database()
+    score, _ = grade(4, "", gt)
+    assert score == 0.0
+
+
+# ── Task 5 grading ────────────────────────────────────────────────────
+
+def test_task5_partial_answer():
+    _, gt = create_database()
+    t5 = gt["task5"]
+    answer = (
+        f"Best month: {t5['best_month']['name']} with ${t5['best_month']['revenue']:.2f}. "
+        f"Worst month: {t5['worst_month']['name']} with ${t5['worst_month']['revenue']:.2f}."
+    )
+    score, _ = grade(5, answer, gt)
+    assert score > 0.0, f"Task 5 partial answer scored {score}"
+
+
+def test_task5_empty():
+    _, gt = create_database()
+    score, _ = grade(5, "", gt)
+    assert score == 0.0
+
+
+# ── Score range for new tasks ─────────────────────────────────────────
+
+def test_all_scores_in_range_5_tasks():
+    """All grader outputs must be in [0.0, 1.0] for all 5 tasks."""
+    _, gt = create_database()
+    test_answers = ["", "random gibberish", "42", "$1,000,000"]
+    for task_id in [1, 2, 3, 4, 5]:
+        for answer in test_answers:
+            score, feedback = grade(task_id, answer, gt)
+            assert 0.0 <= score <= 1.0, f"Task {task_id}: score {score} out of range"
+
+
 if __name__ == "__main__":
     for name, func in list(globals().items()):
         if name.startswith("test_") and callable(func):

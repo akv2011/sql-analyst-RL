@@ -110,6 +110,45 @@ def test_task_descriptions_exist():
         assert len(TASK_DESCRIPTIONS[tid]) > 100
 
 
+def test_ground_truth_task4():
+    """Task 4 ground truth should have data quality issues."""
+    _, gt = create_database()
+    assert "task4" in gt
+    t4 = gt["task4"]
+    assert t4["discrepancy_count"] > 0
+    assert t4["avg_discrepancy_pct"] > 0
+    assert t4["negative_margin_count"] > 0
+    assert len(t4["negative_margin_categories"]) > 0
+
+
+def test_ground_truth_task5():
+    """Task 5 ground truth should have monthly revenues and cohort data."""
+    _, gt = create_database()
+    assert "task5" in gt
+    t5 = gt["task5"]
+    assert len(t5["monthly_revenues"]) == 12
+    assert t5["best_month"]["revenue"] > t5["worst_month"]["revenue"]
+    assert len(t5["cohort_retention"]) >= 2
+    assert len(t5["channel_stats"]) == 3
+
+
+def test_task_descriptions_5_tasks():
+    """All 5 task descriptions should exist and be substantial."""
+    for tid in [1, 2, 3, 4, 5]:
+        assert tid in TASK_DESCRIPTIONS
+        assert len(TASK_DESCRIPTIONS[tid]) > 100
+
+
+def test_negative_margin_products_exist():
+    """There should be products with unit_price < cost_price."""
+    conn, _ = create_database()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM products WHERE unit_price < cost_price")
+    count = cur.fetchone()[0]
+    assert count > 0, "No negative margin products found"
+    conn.close()
+
+
 if __name__ == "__main__":
     for name, func in list(globals().items()):
         if name.startswith("test_") and callable(func):

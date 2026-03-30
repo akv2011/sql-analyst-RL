@@ -214,11 +214,16 @@ def create_database() -> Tuple[sqlite3.Connection, Dict[str, Any]]:
 
     products = []
     pid = 1
+    # Plant negative-margin products: ~2 per category for electronics, clothing, sports
+    negative_margin_cats = {"electronics", "clothing", "sports"}
     for cat, info in CATEGORIES.items():
-        for _ in range(20):
+        for prod_idx in range(20):
             subcat = rng.choice(info["subcategories"])
             price = round(rng.uniform(*info["price_range"]), 2)
             cost = round(price * rng.uniform(*info["cost_ratio"]), 2)
+            # Plant negative margins: first 2 products of selected categories
+            if cat in negative_margin_cats and prod_idx < 2:
+                cost = round(price * rng.uniform(1.05, 1.25), 2)  # Cost > price
             name = f"{subcat.replace('_', ' ').title()} {rng.randint(100, 999)}"
             created = _random_date(date(2023, 6, 1), date(2024, 3, 31), rng)
             products.append((pid, name, cat, subcat, price, cost, created.isoformat()))
@@ -276,6 +281,11 @@ def create_database() -> Tuple[sqlite3.Connection, Dict[str, Any]]:
 
             discount = round(total * rng.uniform(0, 0.15), 2)
             total_after = round(total - discount, 2)
+
+            # Plant data quality discrepancies: ~3% of orders have rounding drift
+            if rng.random() < 0.03:
+                drift = rng.uniform(0.02, 0.08) * total  # 2-8% off
+                total_after = round(total_after + (drift if rng.random() < 0.5 else -drift), 2)
 
             # Status: more returns in Q3 for electronics-heavy orders
             status = rng.choice(ORDER_STATUSES)
@@ -541,6 +551,103 @@ def _compute_ground_truth(conn: sqlite3.Connection) -> Dict[str, Any]:
     """)
     campaigns_by_quarter = {row[0]: {"count": row[1], "budget": row[2]} for row in cur.fetchall()}
 
+    # ── Task 4: Data quality audit ground truth ──────────────────────
+
+    # Orders where total_amount + discount differs from SUM(order_items.subtotal) by >1%
+    cur.execute("""
+        SELECT COUNT(*), ROUND(AVG(abs_pct), 2)
+        FROM (
+            SELECT o.order_id,
+                   ABS(o.total_amount + o.discount_amount - oi_sum) / oi_sum * 100 as abs_pct
+            FROM orders o
+            JOIN (
+                SELECT order_id, SUM(subtotal) as oi_sum
+                FROM order_items
+                GROUP BY order_id
+            ) oi ON o.order_id = oi.order_id
+            WHERE oi_sum > 0
+              AND ABS(o.total_amount + o.discount_amount - oi_sum) / oi_sum * 100 > 1.0
+        )
+    """)
+    row = cur.fetchone()
+    discrepancy_count = row[0] or 0
+    avg_discrepancy_pct = row[1] or 0.0
+
+    # Categories where any product has unit_price < cost_price
+    cur.execute("""
+        SELECT DISTINCT category
+        FROM products
+        WHERE unit_price < cost_price
+        ORDER BY category
+    """)
+    negative_margin_categories = [r[0] for r in cur.fetchall()]
+    negative_margin_count = len(negative_margin_categories)
+
+    # ── Task 5: Executive dashboard ground truth ───────────────────
+
+    # Monthly revenue trend (completed orders)
+    cur.execute("""
+        SELECT
+            CAST(substr(order_date, 6, 2) AS INTEGER) as month_num,
+            ROUND(SUM(total_amount), 2) as revenue
+        FROM orders
+        WHERE status = 'completed'
+        GROUP BY month_num
+        ORDER BY month_num
+    """)
+    monthly_data = cur.fetchall()
+    monthly_revenues = {r[0]: r[1] for r in monthly_data}
+    month_names = {
+        1: "January", 2: "February", 3: "March", 4: "April",
+        5: "May", 6: "June", 7: "July", 8: "August",
+        9: "September", 10: "October", 11: "November", 12: "December",
+    }
+    best_month_num = max(monthly_revenues, key=monthly_revenues.get)
+    worst_month_num = min(monthly_revenues, key=monthly_revenues.get)
+
+    # Customer cohort retention: signup quarter → % who ordered in Q4 2024
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN signup_date < '2024-01-01' THEN 'Pre-2024'
+                WHEN signup_date < '2024-04-01' THEN 'Q1-2024'
+                WHEN signup_date < '2024-07-01' THEN 'Q2-2024'
+                ELSE 'Q3Q4-2024'
+            END as cohort,
+            COUNT(*) as total_customers,
+            SUM(CASE WHEN customer_id IN (
+                SELECT DISTINCT customer_id FROM orders
+                WHERE order_date >= '2024-10-01' AND order_date <= '2024-12-31'
+            ) THEN 1 ELSE 0 END) as q4_active
+        FROM customers
+        GROUP BY cohort
+        ORDER BY cohort
+    """)
+    cohort_retention = {}
+    for row in cur.fetchall():
+        rate = round(100.0 * row[2] / row[1], 2) if row[1] > 0 else 0
+        cohort_retention[row[0]] = {"total": row[1], "q4_active": row[2], "retention_pct": rate}
+
+    # Channel performance
+    cur.execute("""
+        SELECT
+            o.channel,
+            ROUND(AVG(o.total_amount), 2) as avg_revenue_per_order,
+            COUNT(DISTINCT o.order_id) as order_count,
+            ROUND(100.0 * COUNT(DISTINCT CASE WHEN o.status = 'returned' THEN o.order_id END)
+                / COUNT(DISTINCT o.order_id), 2) as return_rate
+        FROM orders o
+        GROUP BY o.channel
+        ORDER BY avg_revenue_per_order DESC
+    """)
+    channel_stats = {}
+    for row in cur.fetchall():
+        channel_stats[row[0]] = {
+            "avg_revenue_per_order": row[1],
+            "order_count": row[2],
+            "return_rate": row[3],
+        }
+
     return {
         "task1": {
             "dec_revenue": dec_revenue,
@@ -560,6 +667,19 @@ def _compute_ground_truth(conn: sqlite3.Connection) -> Dict[str, Any]:
             "electronics_return_q3": electronics_return_rates.get("Q3", 0),
             "electronics_return_other": electronics_return_rates.get("Other", 0),
             "campaigns_by_quarter": campaigns_by_quarter,
+        },
+        "task4": {
+            "discrepancy_count": discrepancy_count,
+            "avg_discrepancy_pct": avg_discrepancy_pct,
+            "negative_margin_categories": negative_margin_categories,
+            "negative_margin_count": negative_margin_count,
+        },
+        "task5": {
+            "monthly_revenues": monthly_revenues,
+            "best_month": {"num": best_month_num, "name": month_names[best_month_num], "revenue": monthly_revenues[best_month_num]},
+            "worst_month": {"num": worst_month_num, "name": month_names[worst_month_num], "revenue": monthly_revenues[worst_month_num]},
+            "cohort_retention": cohort_retention,
+            "channel_stats": channel_stats,
         },
     }
 
@@ -670,6 +790,34 @@ TASK_DESCRIPTIONS = {
         "Support every claim with specific numbers from the database. "
         "Use execute_sql actions to query the database, then submit your "
         "comprehensive analysis with submit_answer when ready."
+    ),
+    4: (
+        "TASK 4 (Medium): Data Quality Audit\n"
+        "Audit the database for data quality issues:\n\n"
+        "1. Find orders where the recorded total_amount + discount_amount differs "
+        "from the actual sum of order_items subtotals by more than 1%. "
+        "How many such orders exist? What is the average discrepancy percentage?\n\n"
+        "2. Identify product categories that contain products with negative margins "
+        "(where unit_price < cost_price). Which categories are affected and how many?\n\n"
+        "Use execute_sql actions to query the database, then submit your "
+        "findings with submit_answer when ready."
+    ),
+    5: (
+        "TASK 5 (Hard): Executive Dashboard Summary\n"
+        "The CEO requests a single-page dashboard covering all of 2024. "
+        "Provide a comprehensive analysis with exact figures:\n\n"
+        "1. MONTHLY REVENUE TREND: Show the monthly revenue for completed orders "
+        "across all 12 months. Identify the best and worst performing months "
+        "with their exact revenue figures.\n\n"
+        "2. CUSTOMER COHORT RETENTION: For each customer signup period "
+        "(Pre-2024, Q1-2024, Q2-2024, Q3Q4-2024), compute the retention rate — "
+        "the percentage of customers in each cohort who placed at least one order "
+        "in Q4 2024 (October-December).\n\n"
+        "3. CHANNEL PERFORMANCE: Rank the sales channels (web, mobile, in-store) "
+        "by average revenue per order. Also report the return rate for each channel.\n\n"
+        "Support all figures with exact numbers from your SQL queries. "
+        "Use execute_sql actions to query the database, then submit your "
+        "complete dashboard with submit_answer when ready."
     ),
 }
 

@@ -100,7 +100,8 @@ def build_system_prompt(schema: str) -> str:
         "- Only SELECT queries are allowed (read-only database).\n"
         "- When ready to answer, start your response with FINAL ANSWER: followed by your complete analysis.\n"
         "- Be precise with numbers. Use $ for money and % for percentages.\n"
-        "- Include the exact values from your query results in your answer.\n\n"
+        "- Include the exact values from your query results in your answer.\n"
+        "- For complex tasks, number your recommendations (1. 2. 3.) with at least one sentence each.\n\n"
         f"DATABASE SCHEMA:\n{schema}\n"
     )
 
@@ -219,7 +220,7 @@ def main():
     env = SqlAnalystEnvironment()
     scores = {}
 
-    for task_id in [1, 2, 3]:
+    for task_id in [1, 2, 3, 4, 5]:
         reward = run_task(env, task_id)
         scores[f"task_{task_id}"] = reward
 

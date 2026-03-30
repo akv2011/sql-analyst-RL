@@ -163,17 +163,19 @@ def test_submit_after_done_returns_done():
 
 def test_perfect_task1_scores_high():
     """Submitting the exact correct answer should score close to 1.0."""
+    from server.database import create_database
+    _, gt = create_database()
+    t1 = gt["task1"]
+    rev = t1["dec_revenue"]
+    cust_str = ", ".join(f"{n} ({c})" for n, c in t1["top_customers"])
+
     env = make_env()
     env.reset(task_id=1)
     # Run one query first to simulate real usage
     env.step(SqlAnalystAction(action_type="execute_sql", content="SELECT 1"))
     obs = env.step(SqlAnalystAction(
         action_type="submit_answer",
-        content=(
-            "1. Total revenue for completed orders in December 2024: $266,532.48\n"
-            "2. Top 5 customers: Alexander White (14), Edward White (14), "
-            "Frank Wright (14), Andrew Roberts (13), Donna Torres (13)."
-        )
+        content=f"1. Total revenue for completed orders in December 2024: ${rev:.2f}\n2. Top 5 customers: {cust_str}."
     ))
     assert obs.reward >= 0.9, f"Perfect answer scored {obs.reward}"
 
@@ -215,28 +217,167 @@ def test_unknown_action_type():
 
 def test_efficiency_penalty():
     """Many queries should reduce the final reward vs few queries."""
+    from server.database import create_database
+    _, gt = create_database()
+    t1 = gt["task1"]
+    rev = t1["dec_revenue"]
+    cust_str = ", ".join(f"{n} ({c})" for n, c in t1["top_customers"])
+    answer = f"Revenue: ${rev:.2f}. Top 5: {cust_str}."
+
     env1 = make_env()
     env1.reset(task_id=1)
     # Few queries
     env1.step(SqlAnalystAction(action_type="execute_sql", content="SELECT 1"))
-    obs1 = env1.step(SqlAnalystAction(
-        action_type="submit_answer",
-        content="Revenue: $266,532.48. Top 5: Alexander White (14), Edward White (14), Frank Wright (14), Andrew Roberts (13), Donna Torres (13)."
-    ))
+    obs1 = env1.step(SqlAnalystAction(action_type="submit_answer", content=answer))
 
     env2 = make_env()
     env2.reset(task_id=1)
     # Many queries
     for _ in range(10):
         env2.step(SqlAnalystAction(action_type="execute_sql", content="SELECT 1"))
-    obs2 = env2.step(SqlAnalystAction(
-        action_type="submit_answer",
-        content="Revenue: $266,532.48. Top 5: Alexander White (14), Edward White (14), Frank Wright (14), Andrew Roberts (13), Donna Torres (13)."
-    ))
+    obs2 = env2.step(SqlAnalystAction(action_type="submit_answer", content=answer))
 
     assert obs1.reward > obs2.reward, (
         f"Fewer queries ({obs1.reward}) should score higher than many ({obs2.reward})"
     )
+
+
+# ── Task 4 & 5 tests ────────────────────────────────────────────────
+
+def test_task4_reset_and_submit():
+    """Task 4 should be resettable and gradable."""
+    env = make_env()
+    obs = env.reset(task_id=4)
+    assert obs.task_id == 4
+    assert "Data Quality" in obs.task_description
+    obs = env.step(SqlAnalystAction(action_type="submit_answer", content="Found 157 discrepancies."))
+    assert obs.done is True
+    assert 0.0 <= obs.reward <= 1.0
+
+
+def test_task5_reset_and_submit():
+    """Task 5 should be resettable and gradable."""
+    env = make_env()
+    obs = env.reset(task_id=5)
+    assert obs.task_id == 5
+    assert "Dashboard" in obs.task_description or "Executive" in obs.task_description
+    obs = env.step(SqlAnalystAction(action_type="submit_answer", content="Monthly revenue analysis..."))
+    assert obs.done is True
+    assert 0.0 <= obs.reward <= 1.0
+
+
+# ── New action type tests ───────────────────────────────────────────
+
+def test_request_schema_action():
+    """Schema requests should return schema without costing a step."""
+    env = make_env()
+    env.reset(task_id=1)
+    env.step(SqlAnalystAction(action_type="execute_sql", content="SELECT 1"))
+    step_before = env.state.step_count
+    obs = env.step(SqlAnalystAction(action_type="request_schema", content=""))
+    assert len(obs.schema_info) > 500
+    assert obs.done is False
+    assert env.state.step_count == step_before
+
+
+def test_request_hint():
+    """Hints should return with increasing penalty."""
+    env = make_env()
+    env.reset(task_id=1)
+    obs1 = env.step(SqlAnalystAction(action_type="request_hint", content=""))
+    assert "Hint:" in obs1.message
+    assert obs1.reward < 0  # Penalty
+    obs2 = env.step(SqlAnalystAction(action_type="request_hint", content=""))
+    assert "Hint:" in obs2.message
+    assert obs2.reward < obs1.reward  # Increasing penalty
+    # Third hint should say no more
+    obs3 = env.step(SqlAnalystAction(action_type="request_hint", content=""))
+    assert "No more hints" in obs3.message
+
+
+def test_explain_sql():
+    """EXPLAIN should return query plan without step cost."""
+    env = make_env()
+    env.reset(task_id=1)
+    step_before = env.state.step_count
+    obs = env.step(SqlAnalystAction(
+        action_type="explain_sql",
+        content="SELECT * FROM orders JOIN customers ON orders.customer_id = customers.customer_id"
+    ))
+    assert obs.query_result is not None
+    assert "SCAN" in obs.query_result or "SEARCH" in obs.query_result
+    assert env.state.step_count == step_before
+
+
+# ── Reward and observation enhancement tests ────────────────────────
+
+def test_reward_not_overwritten_on_submit():
+    """Intermediate rewards should be incorporated into final reward."""
+    env = make_env()
+    env.reset(task_id=1)
+    env.step(SqlAnalystAction(action_type="execute_sql", content="SELECT * FROM orders LIMIT 5"))
+    env.step(SqlAnalystAction(action_type="execute_sql", content="SELECT * FROM customers LIMIT 5"))
+    intermediate = env._total_reward
+    assert intermediate > 0
+
+    from server.database import create_database
+    _, gt = create_database()
+    t1 = gt["task1"]
+    rev = t1["dec_revenue"]
+    cust_str = ", ".join(f"{n} ({c})" for n, c in t1["top_customers"])
+    obs = env.step(SqlAnalystAction(
+        action_type="submit_answer",
+        content=f"Revenue: ${rev:.2f}. Top 5: {cust_str}."
+    ))
+    assert obs.reward > 0.8
+
+
+def test_table_detection_ignores_comments():
+    """Table names in SQL comments should not count as discovered."""
+    env = make_env()
+    env.reset(task_id=1)
+    env.step(SqlAnalystAction(
+        action_type="execute_sql",
+        content="-- SELECT * FROM orders\nSELECT 1"
+    ))
+    assert "orders" not in env._tables_queried
+
+
+def test_reward_breakdown_on_submit():
+    """Submit observations should include reward breakdown."""
+    env = make_env()
+    env.reset(task_id=1)
+    obs = env.step(SqlAnalystAction(action_type="submit_answer", content="Revenue: $100"))
+    assert obs.reward_breakdown is not None
+    assert "raw_score" in obs.reward_breakdown
+    assert "efficiency_multiplier" in obs.reward_breakdown
+
+
+def test_query_history_tracked():
+    """Query history should be tracked and returned in observations."""
+    env = make_env()
+    env.reset(task_id=1)
+    obs = env.step(SqlAnalystAction(action_type="execute_sql", content="SELECT COUNT(*) FROM orders"))
+    assert obs.query_history is not None
+    assert len(obs.query_history) == 1
+    assert obs.query_history[0]["row_count"] == 1
+
+
+def test_get_metadata():
+    """get_metadata should return valid EnvironmentMetadata."""
+    env = make_env()
+    meta = env.get_metadata()
+    assert meta.name == "SQL Analyst Environment"
+    assert meta.version == "0.2.0"
+    assert "SQL" in meta.description
+
+
+def test_close():
+    """close() should clean up without errors."""
+    env = make_env()
+    env.reset(task_id=1)
+    env.close()
+    assert env._db_conn is None
 
 
 if __name__ == "__main__":
