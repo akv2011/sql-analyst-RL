@@ -117,14 +117,16 @@ export OPENAI_API_KEY="your-key-here"
 python inference.py
 ```
 
-### Baseline Scores (GPT-4o)
+### Baseline Scores (GPT-4o-mini)
 
 | Task | Score |
 |------|-------|
-| Task 1 (Easy) | ~0.80 |
-| Task 2 (Medium) | ~0.55 |
-| Task 3 (Hard) | ~0.45 |
-| **Average** | **~0.60** |
+| Task 1 (Easy) | 0.58 |
+| Task 2 (Medium) | 0.43 |
+| Task 3 (Hard) | 0.57 |
+| **Average** | **0.53** |
+
+*Scores are reproducible with the same model and temperature=0.1. Stronger models (GPT-4o, Claude) are expected to score higher.*
 
 ## Environment Variables
 

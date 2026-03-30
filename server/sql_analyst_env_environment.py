@@ -38,6 +38,13 @@ class SqlAnalystEnvironment(Environment):
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
+    # Tables that are relevant to each task — used for intermediate rewards
+    TASK_RELEVANT_TABLES = {
+        1: {"orders", "customers"},
+        2: {"orders", "order_items", "products", "returns", "customers"},
+        3: {"orders", "order_items", "products", "returns", "marketing_campaigns", "campaign_attributions", "customers"},
+    }
+
     def __init__(self):
         super().__init__()
         self._db_conn: Optional[sqlite3.Connection] = None
@@ -46,6 +53,9 @@ class SqlAnalystEnvironment(Environment):
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._task_id = 1
         self._queries_executed = 0
+        self._successful_queries = 0
+        self._failed_queries = 0
+        self._tables_queried: set = set()
         self._max_steps = 20
         self._done = False
         self._total_reward = 0.0
@@ -78,6 +88,9 @@ class SqlAnalystEnvironment(Environment):
             step_count=0,
         )
         self._queries_executed = 0
+        self._successful_queries = 0
+        self._failed_queries = 0
+        self._tables_queried = set()
         self._done = False
         self._total_reward = 0.0
 
@@ -166,9 +179,12 @@ class SqlAnalystEnvironment(Environment):
                 message="Please provide a valid SQL query.",
             )
 
-        # Block dangerous operations
+        # Block dangerous operations — negative reward for trying
         sql_upper = sql.upper().strip()
         if any(kw in sql_upper for kw in ["DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "CREATE"]):
+            self._failed_queries += 1
+            reward = -0.05  # Penalize destructive attempts
+            self._total_reward += reward
             return SqlAnalystObservation(
                 task_description=TASK_DESCRIPTIONS.get(self._task_id, ""),
                 schema_info=self._schema_info,
@@ -176,7 +192,7 @@ class SqlAnalystEnvironment(Environment):
                 step_number=self._state.step_count,
                 max_steps=self._max_steps,
                 done=False,
-                reward=0.0,
+                reward=reward,
                 error_message="Only SELECT queries are allowed. Data modification is not permitted.",
                 message="Read-only environment. Use SELECT queries only.",
             )
@@ -184,7 +200,7 @@ class SqlAnalystEnvironment(Environment):
         try:
             cur = self._db_conn.cursor()
             cur.execute(sql)
-            rows = cur.fetchmany(100)  # Limit to 100 rows
+            rows = cur.fetchmany(100)
             columns = [desc[0] for desc in cur.description] if cur.description else []
 
             result_data = [dict(zip(columns, row)) for row in rows]
@@ -192,14 +208,19 @@ class SqlAnalystEnvironment(Environment):
 
             total_rows = len(rows)
             if total_rows == 100:
-                # Check if there are more
                 extra = cur.fetchone()
                 if extra:
                     total_rows = "100+ (truncated)"
 
+            self._successful_queries += 1
+
+            # Intermediate reward: reward exploring relevant tables
+            reward = self._compute_query_reward(sql, len(rows))
+            self._total_reward += reward
+
             return SqlAnalystObservation(
                 task_description=TASK_DESCRIPTIONS.get(self._task_id, ""),
-                schema_info="",  # Don't repeat schema on every step
+                schema_info="",
                 query_result=result_json,
                 columns=columns,
                 row_count=len(rows),
@@ -207,10 +228,13 @@ class SqlAnalystEnvironment(Environment):
                 step_number=self._state.step_count,
                 max_steps=self._max_steps,
                 done=False,
-                reward=0.0,
-                message=f"Query executed successfully. {total_rows} rows returned.",
+                reward=reward,
+                message=f"Query executed successfully. {total_rows} rows returned. (reward: {reward:+.3f})",
             )
         except Exception as e:
+            self._failed_queries += 1
+            reward = -0.02  # Small penalty for syntax errors
+            self._total_reward += reward
             return SqlAnalystObservation(
                 task_description=TASK_DESCRIPTIONS.get(self._task_id, ""),
                 schema_info="",
@@ -218,10 +242,50 @@ class SqlAnalystEnvironment(Environment):
                 step_number=self._state.step_count,
                 max_steps=self._max_steps,
                 done=False,
-                reward=0.0,
+                reward=reward,
                 error_message=str(e),
-                message="SQL query failed. Check your syntax and table/column names.",
+                message=f"SQL query failed. (reward: {reward:+.3f})",
             )
+
+    def _compute_query_reward(self, sql: str, row_count: int) -> float:
+        """Compute intermediate reward for a successful SQL query.
+
+        Rewards the agent for:
+        - Querying tables relevant to the current task
+        - Getting non-empty results (suggests a productive query)
+        - Using aggregations (GROUP BY, COUNT, SUM, AVG — signs of analysis)
+        """
+        sql_upper = sql.upper()
+        reward = 0.0
+
+        # Reward for querying relevant tables (only first time each table is hit)
+        relevant = self.TASK_RELEVANT_TABLES.get(self._task_id, set())
+        all_tables = ["customers", "products", "orders", "order_items",
+                       "returns", "marketing_campaigns", "campaign_attributions"]
+        newly_discovered = set()
+        for table in all_tables:
+            if table.upper() in sql_upper and table not in self._tables_queried:
+                self._tables_queried.add(table)
+                if table in relevant:
+                    newly_discovered.add(table)
+
+        if newly_discovered:
+            # Reward proportional to how many relevant tables are now covered
+            coverage = len(self._tables_queried & relevant) / len(relevant)
+            reward += 0.02 * len(newly_discovered)
+            if coverage >= 1.0:
+                reward += 0.03  # Bonus for covering all relevant tables
+
+        # Small reward for non-empty results
+        if row_count > 0:
+            reward += 0.01
+
+        # Reward for analytical queries (aggregations suggest deeper analysis)
+        analytical_keywords = ["GROUP BY", "COUNT(", "SUM(", "AVG(", "HAVING", "ORDER BY"]
+        if any(kw in sql_upper for kw in analytical_keywords):
+            reward += 0.01
+
+        return round(min(reward, 0.1), 4)  # Cap per-query reward at 0.1
 
     def _handle_submit(self, answer: str) -> SqlAnalystObservation:
         """Grade a submitted answer and end the episode."""
