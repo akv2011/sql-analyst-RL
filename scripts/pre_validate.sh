@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Hackathon pre-validation script (recreated from provided snippet).
-# Checks: 1) inference.py exists, 2) Docker builds, 3) openenv validate passes.
+# =============================================================================
+# OpenEnv Hackathon Pre-Submission Validator
+# Recreated from the hackathon-provided script.
+# Checks: 1) Required files exist, 2) Docker builds, 3) openenv validate passes
+# =============================================================================
 
 set -euo pipefail
 
@@ -37,7 +40,7 @@ run_with_timeout() {
 printf "\n${BOLD}OpenEnv Pre-Submission Validator${NC}\n"
 printf "Checking: %s\n\n" "$(cd "$REPO_DIR" && pwd)"
 
-# Step 1: Check required files
+# ── Step 1: Check required files ──────────────────────────────────────────
 log "${BOLD}Step 1/3: Checking required files${NC} ..."
 
 if [ -f "$REPO_DIR/inference.py" ]; then
@@ -61,7 +64,7 @@ else
   stop_at "Step 1"
 fi
 
-# Step 2: Docker build
+# ── Step 2: Docker build ──────────────────────────────────────────────────
 log "${BOLD}Step 2/3: Running docker build${NC} ..."
 
 if ! command -v docker &>/dev/null; then
@@ -92,7 +95,7 @@ else
   stop_at "Step 2"
 fi
 
-# Step 3: openenv validate
+# ── Step 3: openenv validate ──────────────────────────────────────────────
 log "${BOLD}Step 3/3: Running openenv validate${NC} ..."
 
 if ! command -v openenv &>/dev/null; then

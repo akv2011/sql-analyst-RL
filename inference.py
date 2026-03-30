@@ -117,6 +117,7 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
 
     system_prompt = build_system_prompt(schema)
     queries_run = 0
+    llm_text = ""
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -127,12 +128,18 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
         print(f"\n  Step {step}/{MAX_STEPS_PER_TASK} (queries so far: {queries_run})...")
 
         try:
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=2048,
-            )
+            # Build API params — reasoning models (o1/o3/gpt-5.x) don't support temperature
+            api_params = {
+                "model": MODEL_NAME,
+                "messages": messages,
+                "max_completion_tokens": 2048,
+            }
+            model_lower = MODEL_NAME.lower()
+            is_reasoning = any(x in model_lower for x in ["o1", "o3", "gpt-5"])
+            if not is_reasoning:
+                api_params["temperature"] = 0.1
+
+            response = client.chat.completions.create(**api_params)
             llm_text = response.choices[0].message.content or ""
         except Exception as e:
             print(f"  LLM Error: {e}")

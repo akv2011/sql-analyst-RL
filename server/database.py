@@ -109,7 +109,7 @@ def create_database() -> Tuple[sqlite3.Connection, Dict[str, Any]]:
         answers for all 3 tasks.
     """
     rng = random.Random(SEED)
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     cur = conn.cursor()

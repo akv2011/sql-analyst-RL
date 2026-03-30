@@ -45,11 +45,15 @@ class SqlAnalystEnvironment(Environment):
         3: {"orders", "order_items", "products", "returns", "marketing_campaigns", "campaign_attributions", "customers"},
     }
 
+    # Map string task IDs to integers so evaluators can use either format
+    TASK_ID_MAP = {
+        "easy": 1, "1": 1, 1: 1,
+        "medium": 2, "2": 2, 2: 2,
+        "hard": 3, "3": 3, 3: 3,
+    }
+
     def __init__(self):
         super().__init__()
-        self._db_conn: Optional[sqlite3.Connection] = None
-        self._ground_truth = {}
-        self._schema_info = ""
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._task_id = 1
         self._queries_executed = 0
@@ -59,13 +63,25 @@ class SqlAnalystEnvironment(Environment):
         self._max_steps = 20
         self._done = False
         self._total_reward = 0.0
-
-    def _init_db(self):
-        """Initialize (or reinitialize) the database."""
-        if self._db_conn:
-            self._db_conn.close()
+        # Init DB eagerly so stateless HTTP endpoints work (each /step creates a fresh instance)
         self._db_conn, self._ground_truth = create_database()
         self._schema_info = get_schema_info(self._db_conn)
+
+    def _init_db(self):
+        """Reinitialize the database for a fresh episode."""
+        if self._db_conn:
+            try:
+                self._db_conn.close()
+            except Exception:
+                pass  # Ignore thread-safety errors on close
+        self._db_conn, self._ground_truth = create_database()
+        self._schema_info = get_schema_info(self._db_conn)
+
+    def _resolve_task_id(self, raw_task_id) -> int:
+        """Convert any task_id format to int. Accepts 1/2/3, 'easy'/'medium'/'hard', etc."""
+        if isinstance(raw_task_id, str):
+            raw_task_id = raw_task_id.strip().lower()
+        return self.TASK_ID_MAP.get(raw_task_id, 1)
 
     def reset(
         self,
@@ -78,9 +94,7 @@ class SqlAnalystEnvironment(Environment):
         Keyword Args:
             task_id (int): Which task to run (1, 2, or 3). Default 1.
         """
-        self._task_id = kwargs.get("task_id", 1)
-        if self._task_id not in (1, 2, 3):
-            self._task_id = 1
+        self._task_id = self._resolve_task_id(kwargs.get("task_id", 1))
 
         self._init_db()
         self._state = State(

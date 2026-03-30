@@ -1,3 +1,13 @@
+---
+title: SQL Analyst Environment
+emoji: 📊
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 8000
+tags:
+  - openenv
+---
 
 # SQL Analyst Environment
 
@@ -117,16 +127,14 @@ export OPENAI_API_KEY="your-key-here"
 python inference.py
 ```
 
-### Baseline Scores (GPT-4o-mini)
+### Baseline Scores
 
-| Task | Score |
-|------|-------|
-| Task 1 (Easy) | 0.58 |
-| Task 2 (Medium) | 0.43 |
-| Task 3 (Hard) | 0.57 |
-| **Average** | **0.53** |
+| Model | Task 1 | Task 2 | Task 3 | Average |
+|-------|--------|--------|--------|---------|
+| GPT-5.3 | 0.97 | 0.96 | 0.86 | **0.93** |
+| GPT-4o-mini | 0.58 | 0.43 | 0.57 | **0.53** |
 
-*Scores are reproducible with the same model and temperature=0.1. Stronger models (GPT-4o, Claude) are expected to score higher.*
+*Scores are reproducible. The script auto-detects reasoning models and adjusts API parameters accordingly.*
 
 ## Environment Variables
 
