@@ -1,13 +1,3 @@
----
-title: SQL Analyst Environment
-emoji: 📊
-colorFrom: blue
-colorTo: purple
-sdk: docker
-app_port: 8000
-tags:
-  - openenv
----
 
 # SQL Analyst Environment
 
