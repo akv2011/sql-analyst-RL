@@ -1,5 +1,5 @@
 """
-Baseline inference — runs an LLM agent against all 3 tasks.
+Baseline inference — runs an LLM agent against all 5 tasks.
 
 The agent reads the schema, writes SQL queries to explore the data,
 and submits its analysis. We use the OpenAI client so it works with
@@ -214,7 +214,7 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
 
 
 def main():
-    """Run all 3 tasks and report scores."""
+    """Run all 5 tasks and report scores."""
     start_time = time.time()
 
     env = SqlAnalystEnvironment()

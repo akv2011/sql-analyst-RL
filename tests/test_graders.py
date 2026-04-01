@@ -144,7 +144,7 @@ def test_all_scores_in_range():
         "The answer is electronics at 50%",
         "Revenue was $100,000. Decline was 30%.",
     ]
-    for task_id in [1, 2, 3]:
+    for task_id in [1, 2, 3, 4, 5]:
         for answer in test_answers:
             score, feedback = grade(task_id, answer, gt)
             assert 0.0 <= score <= 1.0, f"Task {task_id}, answer '{answer[:30]}': score {score} out of range"
