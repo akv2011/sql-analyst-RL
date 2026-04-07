@@ -1,5 +1,5 @@
 """
-Baseline inference — runs an LLM agent against all 5 tasks.
+Baseline inference — runs an LLM agent against all tasks.
 
 The agent reads the schema, writes SQL queries to explore the data,
 and submits its analysis. We use the OpenAI client so it works with
@@ -9,7 +9,7 @@ Setup:
     conda activate meta
     export API_BASE_URL="https://api.openai.com/v1"
     export MODEL_NAME="gpt-4o"
-    export OPENAI_API_KEY="sk-..."
+    export HF_TOKEN="your-key"
     python inference.py
 """
 
@@ -18,6 +18,7 @@ import re
 import json
 import time
 import sys
+import traceback
 
 from openai import OpenAI
 
@@ -27,34 +28,33 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server.sql_analyst_env_environment import SqlAnalystEnvironment
 from models import SqlAnalystAction
 
-# ── LLM client setup ─────────────────────────────────────────────────────
-
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o")
-API_KEY = os.environ.get("OPENAI_API_KEY", os.environ.get("HF_TOKEN", ""))
-
-if not API_KEY:
-    print("ERROR: Set OPENAI_API_KEY or HF_TOKEN environment variable.")
-    sys.exit(1)
-
-client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+# ── Configuration ─────────────────────────────────────────────────────────
 
 MAX_STEPS_PER_TASK = 15
 MIN_QUERIES_BEFORE_SUBMIT = 2
 FORCE_SUBMIT_STEP = 12
 
 
+def get_config():
+    """Read API config from environment variables."""
+    api_base_url = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
+    model_name = os.environ.get("MODEL_NAME", "gpt-4o")
+    # Hackathon evaluator sets HF_TOKEN; users may set OPENAI_API_KEY
+    api_key = (
+        os.environ.get("HF_TOKEN", "")
+        or os.environ.get("OPENAI_API_KEY", "")
+    )
+    return api_base_url, model_name, api_key
+
+
 def extract_sql(text: str) -> str | None:
     """Extract SQL from ```sql ... ``` blocks or raw SELECT statements."""
-    # First try fenced code blocks
     match = re.search(r"```sql\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
-    # Also try generic code blocks that contain SELECT
     match = re.search(r"```\s*(SELECT\s+.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
-    # Fallback: bare SELECT statement ending with semicolon
     match = re.search(r"(SELECT\s+.+?;)", text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
@@ -62,10 +62,7 @@ def extract_sql(text: str) -> str | None:
 
 
 def extract_final_answer(text: str) -> str | None:
-    """Extract the final answer from the model's response.
-
-    Looks for FINAL ANSWER: or SUBMIT: markers.
-    """
+    """Extract answer after FINAL ANSWER: or SUBMIT: markers."""
     for marker in [r"FINAL\s*ANSWER\s*:", r"SUBMIT\s*:"]:
         match = re.search(marker + r"\s*(.*)", text, re.DOTALL | re.IGNORECASE)
         if match:
@@ -86,7 +83,7 @@ def truncate_result(result_json: str, max_rows: int = 50) -> str:
 
 
 def build_system_prompt(schema: str) -> str:
-    """Build a clear system prompt that forces the model to query first."""
+    """Build a system prompt that forces the model to query first."""
     return (
         "You are an expert SQL data analyst. You have access to an e-commerce SQLite database.\n\n"
         "YOUR WORKFLOW (you MUST follow this order):\n"
@@ -106,7 +103,24 @@ def build_system_prompt(schema: str) -> str:
     )
 
 
-def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
+def call_llm(client: OpenAI, model_name: str, messages: list) -> str:
+    """Call the LLM with model-appropriate parameters. Returns response text."""
+    api_params = {
+        "model": model_name,
+        "messages": messages,
+        "max_completion_tokens": 2048,
+    }
+    # Reasoning models (o1/o3/gpt-5.x) don't support temperature
+    model_lower = model_name.lower()
+    is_reasoning = any(x in model_lower for x in ["o1", "o3", "gpt-5"])
+    if not is_reasoning:
+        api_params["temperature"] = 0.1
+
+    response = client.chat.completions.create(**api_params)
+    return response.choices[0].message.content or ""
+
+
+def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_id: int) -> float:
     """Run one task and return the final reward."""
     print(f"\n{'='*60}")
     print(f"TASK {task_id}")
@@ -129,19 +143,7 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
         print(f"\n  Step {step}/{MAX_STEPS_PER_TASK} (queries so far: {queries_run})...")
 
         try:
-            # Build API params — reasoning models (o1/o3/gpt-5.x) don't support temperature
-            api_params = {
-                "model": MODEL_NAME,
-                "messages": messages,
-                "max_completion_tokens": 2048,
-            }
-            model_lower = MODEL_NAME.lower()
-            is_reasoning = any(x in model_lower for x in ["o1", "o3", "gpt-5"])
-            if not is_reasoning:
-                api_params["temperature"] = 0.1
-
-            response = client.chat.completions.create(**api_params)
-            llm_text = response.choices[0].message.content or ""
+            llm_text = call_llm(client, model_name, messages)
         except Exception as e:
             print(f"  LLM Error: {e}")
             messages.append({"role": "assistant", "content": f"Error: {e}"})
@@ -149,7 +151,7 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
 
         messages.append({"role": "assistant", "content": llm_text})
 
-        # Always check for SQL first — prioritize querying
+        # Always check for SQL first
         sql = extract_sql(llm_text)
         if sql:
             print(f"  Executing SQL: {sql[:100]}...")
@@ -172,7 +174,7 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
             messages.append({"role": "user", "content": result_msg})
             continue
 
-        # Check for final answer — only accept if enough queries were run
+        # Check for final answer
         answer = extract_final_answer(llm_text)
         if answer and queries_run >= MIN_QUERIES_BEFORE_SUBMIT:
             print(f"  Submitting answer ({len(answer)} chars) after {queries_run} queries...")
@@ -181,7 +183,6 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
             print(f"  Feedback: {obs.message}")
             return obs.reward
         elif answer and queries_run < MIN_QUERIES_BEFORE_SUBMIT:
-            # Model tried to answer too early — redirect to querying
             print(f"  Model tried to answer after only {queries_run} queries — redirecting...")
             messages.append({
                 "role": "user",
@@ -193,7 +194,7 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
             })
             continue
 
-        # No SQL and no answer — nudge the model
+        # No SQL and no answer — nudge or force-submit
         if step >= FORCE_SUBMIT_STEP:
             print(f"  Force-submitting at step {step}...")
             obs = env.step(SqlAnalystAction(action_type="submit_answer", content=llm_text))
@@ -214,14 +215,30 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
 
 
 def main():
-    """Run all 5 tasks and report scores."""
+    """Run all tasks and report scores."""
+    api_base_url, model_name, api_key = get_config()
+
+    if not api_key:
+        print("ERROR: Set HF_TOKEN or OPENAI_API_KEY environment variable.")
+        sys.exit(1)
+
+    print(f"API_BASE_URL: {api_base_url}")
+    print(f"MODEL_NAME:   {model_name}")
+
+    client = OpenAI(base_url=api_base_url, api_key=api_key)
+    env = SqlAnalystEnvironment()
     start_time = time.time()
 
-    env = SqlAnalystEnvironment()
+    task_ids = [1, 2, 3]
     scores = {}
 
-    for task_id in [1, 2, 3, 4, 5]:
-        reward = run_task(env, task_id)
+    for task_id in task_ids:
+        try:
+            reward = run_task(env, client, model_name, task_id)
+        except Exception as e:
+            print(f"  Task {task_id} failed with exception: {e}")
+            traceback.print_exc()
+            reward = 0.0
         scores[f"task_{task_id}"] = reward
 
     elapsed = time.time() - start_time
@@ -240,4 +257,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"FATAL: {e}", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
