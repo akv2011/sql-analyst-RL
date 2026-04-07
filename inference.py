@@ -1,9 +1,8 @@
 """
 Baseline inference — runs an LLM agent against all tasks.
 
-The agent reads the schema, writes SQL queries to explore the data,
-and submits its analysis. We use the OpenAI client so it works with
-any compatible API.
+Outputs the required [START]/[STEP]/[END] structured blocks that the
+Phase 2 evaluator parses from stdout.
 
 Setup:
     conda activate meta
@@ -22,7 +21,7 @@ import traceback
 
 from openai import OpenAI
 
-# ── Environment setup (direct import, no HTTP needed for baseline) ────────
+# ── Environment setup ─────────────────────────────────────────────────────
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server.sql_analyst_env_environment import SqlAnalystEnvironment
@@ -34,12 +33,18 @@ MAX_STEPS_PER_TASK = 15
 MIN_QUERIES_BEFORE_SUBMIT = 2
 FORCE_SUBMIT_STEP = 12
 
+TASK_NAMES = {1: "easy", 2: "medium", 3: "hard"}
+
+
+def log(msg: str):
+    """Print to stdout with flush so the evaluator sees output immediately."""
+    print(msg, flush=True)
+
 
 def get_config():
     """Read API config from environment variables."""
     api_base_url = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
     model_name = os.environ.get("MODEL_NAME", "gpt-4o")
-    # Hackathon evaluator sets HF_TOKEN; users may set OPENAI_API_KEY
     api_key = (
         os.environ.get("HF_TOKEN", "")
         or os.environ.get("OPENAI_API_KEY", "")
@@ -104,13 +109,12 @@ def build_system_prompt(schema: str) -> str:
 
 
 def call_llm(client: OpenAI, model_name: str, messages: list) -> str:
-    """Call the LLM with model-appropriate parameters. Returns response text."""
+    """Call the LLM with model-appropriate parameters."""
     api_params = {
         "model": model_name,
         "messages": messages,
         "max_completion_tokens": 2048,
     }
-    # Reasoning models (o1/o3/gpt-5.x) don't support temperature
     model_lower = model_name.lower()
     is_reasoning = any(x in model_lower for x in ["o1", "o3", "gpt-5"])
     if not is_reasoning:
@@ -121,10 +125,11 @@ def call_llm(client: OpenAI, model_name: str, messages: list) -> str:
 
 
 def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_id: int) -> float:
-    """Run one task and return the final reward."""
-    print(f"\n{'='*60}")
-    print(f"TASK {task_id}")
-    print(f"{'='*60}")
+    """Run one task. Emits [START], [STEP], and [END] blocks for the evaluator."""
+    task_name = TASK_NAMES.get(task_id, f"task{task_id}")
+
+    # ── [START] block ─────────────────────────────────────────────────
+    log(f"[START] task={task_name}")
 
     obs = env.reset(task_id=task_id)
     schema = obs.schema_info
@@ -133,6 +138,8 @@ def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_i
     system_prompt = build_system_prompt(schema)
     queries_run = 0
     llm_text = ""
+    step_num = 0
+    last_reward = 0.0
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -140,23 +147,26 @@ def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_i
     ]
 
     for step in range(1, MAX_STEPS_PER_TASK + 1):
-        print(f"\n  Step {step}/{MAX_STEPS_PER_TASK} (queries so far: {queries_run})...")
+        step_num = step
 
         try:
             llm_text = call_llm(client, model_name, messages)
         except Exception as e:
-            print(f"  LLM Error: {e}")
+            log(f"[STEP] step={step} reward=0.0 action=llm_error info=\"{e}\"")
             messages.append({"role": "assistant", "content": f"Error: {e}"})
             continue
 
         messages.append({"role": "assistant", "content": llm_text})
 
-        # Always check for SQL first
+        # Check for SQL first
         sql = extract_sql(llm_text)
         if sql:
-            print(f"  Executing SQL: {sql[:100]}...")
             obs = env.step(SqlAnalystAction(action_type="execute_sql", content=sql))
             queries_run += 1
+            last_reward = obs.reward or 0.0
+
+            # ── [STEP] block for SQL execution ────────────────────────
+            log(f"[STEP] step={step} reward={last_reward} action=execute_sql")
 
             if obs.error_message:
                 result_msg = f"SQL Error: {obs.error_message}\nPlease fix the query and try again."
@@ -177,13 +187,13 @@ def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_i
         # Check for final answer
         answer = extract_final_answer(llm_text)
         if answer and queries_run >= MIN_QUERIES_BEFORE_SUBMIT:
-            print(f"  Submitting answer ({len(answer)} chars) after {queries_run} queries...")
             obs = env.step(SqlAnalystAction(action_type="submit_answer", content=answer))
-            print(f"  Reward: {obs.reward}")
-            print(f"  Feedback: {obs.message}")
-            return obs.reward
+            last_reward = obs.reward or 0.0
+            log(f"[STEP] step={step} reward={last_reward} action=submit_answer")
+            log(f"[END] task={task_name} score={last_reward} steps={step}")
+            return last_reward
         elif answer and queries_run < MIN_QUERIES_BEFORE_SUBMIT:
-            print(f"  Model tried to answer after only {queries_run} queries — redirecting...")
+            log(f"[STEP] step={step} reward=0.0 action=redirect_to_query")
             messages.append({
                 "role": "user",
                 "content": (
@@ -196,22 +206,24 @@ def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_i
 
         # No SQL and no answer — nudge or force-submit
         if step >= FORCE_SUBMIT_STEP:
-            print(f"  Force-submitting at step {step}...")
             obs = env.step(SqlAnalystAction(action_type="submit_answer", content=llm_text))
-            print(f"  Reward: {obs.reward}")
-            print(f"  Feedback: {obs.message}")
-            return obs.reward
+            last_reward = obs.reward or 0.0
+            log(f"[STEP] step={step} reward={last_reward} action=force_submit")
+            log(f"[END] task={task_name} score={last_reward} steps={step}")
+            return last_reward
 
+        log(f"[STEP] step={step} reward=0.0 action=nudge")
         messages.append({
             "role": "user",
             "content": "Please write a SQL query inside a ```sql ... ``` block to explore the data.",
         })
 
     # Max steps reached
-    print("  Max steps reached. Force-submitting last response...")
     obs = env.step(SqlAnalystAction(action_type="submit_answer", content=llm_text))
-    print(f"  Reward: {obs.reward}")
-    return obs.reward
+    last_reward = obs.reward or 0.0
+    log(f"[STEP] step={step_num} reward={last_reward} action=max_steps_submit")
+    log(f"[END] task={task_name} score={last_reward} steps={step_num}")
+    return last_reward
 
 
 def main():
@@ -219,11 +231,11 @@ def main():
     api_base_url, model_name, api_key = get_config()
 
     if not api_key:
-        print("ERROR: Set HF_TOKEN or OPENAI_API_KEY environment variable.")
+        log("ERROR: Set HF_TOKEN or OPENAI_API_KEY environment variable.")
         sys.exit(1)
 
-    print(f"API_BASE_URL: {api_base_url}")
-    print(f"MODEL_NAME:   {model_name}")
+    log(f"API_BASE_URL: {api_base_url}")
+    log(f"MODEL_NAME:   {model_name}")
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
     env = SqlAnalystEnvironment()
@@ -236,30 +248,27 @@ def main():
         try:
             reward = run_task(env, client, model_name, task_id)
         except Exception as e:
-            print(f"  Task {task_id} failed with exception: {e}")
+            task_name = TASK_NAMES.get(task_id, f"task{task_id}")
+            log(f"[STEP] step=0 reward=0.0 action=error info=\"{e}\"")
+            log(f"[END] task={task_name} score=0.0 steps=0")
             traceback.print_exc()
             reward = 0.0
         scores[f"task_{task_id}"] = reward
 
     elapsed = time.time() - start_time
+    avg = sum(scores.values()) / len(scores)
 
-    print(f"\n{'='*60}")
-    print("FINAL SCORES")
-    print(f"{'='*60}")
+    log(f"\nFINAL SCORES:")
     for task, score in scores.items():
-        print(f"  {task}: {score:.4f}")
-    total = sum(scores.values())
-    avg = total / len(scores)
-    print(f"  Total:  {total:.4f}")
-    print(f"  Average: {avg:.4f}")
-    print(f"  Time:   {elapsed:.1f}s")
-    print(f"{'='*60}")
+        log(f"  {task}: {score:.4f}")
+    log(f"  Average: {avg:.4f}")
+    log(f"  Time:   {elapsed:.1f}s")
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"FATAL: {e}", file=sys.stderr)
+        print(f"FATAL: {e}", file=sys.stderr, flush=True)
         traceback.print_exc()
         sys.exit(1)
