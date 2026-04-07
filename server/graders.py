@@ -501,19 +501,29 @@ def grade_task5(answer: str, ground_truth: Dict[str, Any]) -> Tuple[float, str]:
     return round(min(score, 1.0), 4), " | ".join(feedback_parts)
 
 
+def _clamp_strict(score: float) -> float:
+    """Clamp score to strictly between 0 and 1 (exclusive).
+
+    The Phase 2 evaluator requires scores in the open interval (0, 1).
+    """
+    return max(0.001, min(0.999, score))
+
+
 def grade(task_id: int, answer: str, ground_truth: Dict[str, Any]) -> Tuple[float, str]:
     """Route to the appropriate task grader."""
     task_gt = ground_truth.get(f"task{task_id}", {})
 
     if task_id == 1:
-        return grade_task1(answer, task_gt)
+        score, feedback = grade_task1(answer, task_gt)
     elif task_id == 2:
-        return grade_task2(answer, task_gt)
+        score, feedback = grade_task2(answer, task_gt)
     elif task_id == 3:
-        return grade_task3(answer, task_gt)
+        score, feedback = grade_task3(answer, task_gt)
     elif task_id == 4:
-        return grade_task4(answer, task_gt)
+        score, feedback = grade_task4(answer, task_gt)
     elif task_id == 5:
-        return grade_task5(answer, task_gt)
+        score, feedback = grade_task5(answer, task_gt)
     else:
-        return 0.0, f"Unknown task_id: {task_id}"
+        score, feedback = 0.0, f"Unknown task_id: {task_id}"
+
+    return _clamp_strict(score), feedback

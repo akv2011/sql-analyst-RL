@@ -150,7 +150,7 @@ class SqlAnalystEnvironment(Environment):
                 step_number=self._state.step_count,
                 max_steps=self._max_steps,
                 done=True,
-                reward=0.0,
+                reward=0.001,
                 message="Episode already finished. Call reset() to start a new episode.",
             )
 
@@ -171,7 +171,7 @@ class SqlAnalystEnvironment(Environment):
                     step_number=self._state.step_count,
                     max_steps=self._max_steps,
                     done=True,
-                    reward=0.0,
+                    reward=0.001,
                     message=f"Maximum steps ({self._max_steps}) reached. Episode ended with no submission.",
                 )
 
@@ -418,8 +418,8 @@ class SqlAnalystEnvironment(Environment):
                 step_number=self._state.step_count,
                 max_steps=self._max_steps,
                 done=True,
-                reward=0.0,
-                message="Empty answer submitted. Score: 0.0",
+                reward=0.001,
+                message="Empty answer submitted. Score: 0.001",
             )
 
         # Get raw score from grader
@@ -437,6 +437,8 @@ class SqlAnalystEnvironment(Environment):
         # Incorporate intermediate exploration rewards (capped at 0.15 bonus)
         exploration_bonus = min(self._total_reward, 0.15)
         final_reward = round(raw_score * efficiency * step_decay, 4)
+        # Clamp to (0, 1) exclusive — Phase 2 evaluator rejects exactly 0.0 or 1.0
+        final_reward = max(0.001, min(0.999, final_reward))
         self._total_reward = final_reward + exploration_bonus
 
         reward_breakdown = {

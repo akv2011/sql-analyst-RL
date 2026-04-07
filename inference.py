@@ -124,6 +124,11 @@ def call_llm(client: OpenAI, model_name: str, messages: list) -> str:
     return response.choices[0].message.content or ""
 
 
+def clamp_score(score: float) -> float:
+    """Clamp to strictly (0, 1) — evaluator rejects exactly 0.0 or 1.0."""
+    return max(0.001, min(0.999, score))
+
+
 def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_id: int) -> float:
     """Run one task. Emits [START], [STEP], and [END] blocks for the evaluator."""
     task_name = TASK_NAMES.get(task_id, f"task{task_id}")
@@ -191,7 +196,7 @@ def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_i
             last_reward = obs.reward or 0.0
             log(f"[STEP] step={step} reward={last_reward} action=submit_answer")
             log(f"[END] task={task_name} score={last_reward} steps={step}")
-            return last_reward
+            return clamp_score(last_reward)
         elif answer and queries_run < MIN_QUERIES_BEFORE_SUBMIT:
             log(f"[STEP] step={step} reward=0.0 action=redirect_to_query")
             messages.append({
@@ -210,7 +215,7 @@ def run_task(env: SqlAnalystEnvironment, client: OpenAI, model_name: str, task_i
             last_reward = obs.reward or 0.0
             log(f"[STEP] step={step} reward={last_reward} action=force_submit")
             log(f"[END] task={task_name} score={last_reward} steps={step}")
-            return last_reward
+            return clamp_score(last_reward)
 
         log(f"[STEP] step={step} reward=0.0 action=nudge")
         messages.append({
