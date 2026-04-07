@@ -1,5 +1,5 @@
 """
-Grading logic for the five tasks.
+Grading logic for all five tasks.
 
 Each grader takes the agent's free-text answer and scores it 0.0 to 1.0.
 We give partial credit — if you got the right category but wrong percentage,

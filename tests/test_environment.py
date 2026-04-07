@@ -25,9 +25,9 @@ def test_reset_returns_observation():
     assert obs.step_number == 0
 
 
-def test_reset_all_three_tasks():
+def test_reset_all_five_tasks():
     env = make_env()
-    for tid in [1, 2, 3]:
+    for tid in [1, 2, 3, 4, 5]:
         obs = env.reset(task_id=tid)
         assert obs.task_id == tid
         assert f"TASK {tid}" in obs.task_description
