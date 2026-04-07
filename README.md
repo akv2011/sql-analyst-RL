@@ -168,8 +168,20 @@ Every observation includes a `reward_breakdown` dict showing exactly how the rew
 conda activate meta
 export API_BASE_URL="https://api.openai.com/v1"
 export MODEL_NAME="gpt-4o"
-export OPENAI_API_KEY="your-key-here"
+export HF_TOKEN="your-key-here"
+# optional local fallback
+# export OPENAI_API_KEY="your-key-here"
 python inference.py
+```
+
+Optional:
+
+```bash
+# Run only the minimum judging set
+python inference.py --tasks 1,2,3
+
+# Save a machine-readable score summary
+python inference.py --summary-path baseline_scores.json
 ```
 
 ### Baseline Scores
@@ -179,7 +191,22 @@ python inference.py
 | GPT-5.3 | 0.97 | 0.96 | 0.86 | 0.92 | 0.78 | **0.90** |
 | GPT-4o-mini | 0.58 | 0.43 | 0.57 | 0.45 | 0.35 | **0.48** |
 
-*Scores are reproducible. The script auto-detects reasoning models and adjusts API parameters accordingly.*
+*Scores are reproducible. The script defaults to all 5 tasks, supports `--tasks` for targeted runs, and auto-detects reasoning models for compatible API parameters.*
+
+## Pre-Submission Validation
+
+```bash
+bash scripts/pre_validate.sh
+```
+
+Optional hosted checks:
+
+```bash
+export SPACE_URL="https://your-space.hf.space"
+export HF_TOKEN="your-key-here"
+export MODEL_NAME="gpt-4o-mini"
+bash scripts/pre_validate.sh
+```
 
 ## Environment Variables
 
@@ -187,8 +214,10 @@ python inference.py
 |----------|-------------|
 | `API_BASE_URL` | LLM API endpoint (e.g., `https://api.openai.com/v1`) |
 | `MODEL_NAME` | Model identifier (e.g., `gpt-4o`) |
-| `OPENAI_API_KEY` | API key for LLM calls |
-| `HF_TOKEN` | HuggingFace token (for deployment) |
+| `HF_TOKEN` | Primary API token for baseline inference / submission config |
+| `OPENAI_API_KEY` | Optional local fallback if you are calling OpenAI directly |
+| `TASK_IDS` | Optional comma-separated task ids for `inference.py` |
+| `SPACE_URL` | Optional HF Space root URL for hosted `/reset` validation |
 
 See `.env.example` for a template.
 

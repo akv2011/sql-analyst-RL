@@ -1,18 +1,18 @@
-"""
-Baseline inference — runs an LLM agent against all 3 tasks.
+"""Baseline inference for the SQL Analyst OpenEnv environment.
 
-The agent reads the schema, writes SQL queries to explore the data,
-and submits its analysis. We use the OpenAI client so it works with
-any compatible API.
+The agent reads the schema, explores with SQL, and submits a final
+analysis for each configured task. The script uses the OpenAI client
+and reads the required LLM settings from environment variables.
 
 Setup:
     conda activate meta
     export API_BASE_URL="https://api.openai.com/v1"
     export MODEL_NAME="gpt-4o"
-    export OPENAI_API_KEY="sk-..."
+    export HF_TOKEN="hf_or_openai_compatible_token"
     python inference.py
 """
 
+import argparse
 import os
 import re
 import json
@@ -29,19 +29,75 @@ from models import SqlAnalystAction
 
 # ── LLM client setup ─────────────────────────────────────────────────────
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o")
-API_KEY = os.environ.get("OPENAI_API_KEY", os.environ.get("HF_TOKEN", ""))
-
-if not API_KEY:
-    print("ERROR: Set OPENAI_API_KEY or HF_TOKEN environment variable.")
-    sys.exit(1)
-
-client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-MAX_STEPS_PER_TASK = 15
+DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_MODEL_NAME = "gpt-4o"
+DEFAULT_TASK_IDS = (1, 2, 3, 4, 5)
+DEFAULT_MAX_STEPS = 15
 MIN_QUERIES_BEFORE_SUBMIT = 2
-FORCE_SUBMIT_STEP = 12
+DEFAULT_FORCE_SUBMIT_STEP = 12
+
+
+def parse_task_ids(raw_task_ids: str | None) -> list[int]:
+    """Parse a comma-separated task id list."""
+    if not raw_task_ids:
+        return list(DEFAULT_TASK_IDS)
+
+    task_ids = []
+    for token in raw_task_ids.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            task_id = int(token)
+        except ValueError as exc:
+            raise ValueError(f"Invalid task id '{token}'. Use comma-separated integers.") from exc
+        if task_id not in DEFAULT_TASK_IDS:
+            raise ValueError(f"Unsupported task id '{task_id}'. Available tasks: {DEFAULT_TASK_IDS}.")
+        task_ids.append(task_id)
+
+    if not task_ids:
+        raise ValueError("No valid task ids were provided.")
+    return task_ids
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for baseline execution."""
+    parser = argparse.ArgumentParser(description="Run the SQL Analyst baseline agent.")
+    parser.add_argument(
+        "--tasks",
+        default=os.environ.get("TASK_IDS"),
+        help="Comma-separated task ids to run. Defaults to all tasks (1,2,3,4,5).",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=int(os.environ.get("MAX_STEPS_PER_TASK", DEFAULT_MAX_STEPS)),
+        help=f"Maximum model steps per task. Default: {DEFAULT_MAX_STEPS}.",
+    )
+    parser.add_argument(
+        "--summary-path",
+        default=os.environ.get("BASELINE_SUMMARY_PATH"),
+        help="Optional path to write the final score summary as JSON.",
+    )
+    return parser.parse_args()
+
+
+def build_client() -> OpenAI:
+    """Build the OpenAI-compatible client from environment variables."""
+    api_base_url = os.environ.get("API_BASE_URL", DEFAULT_API_BASE_URL)
+    model_name = os.environ.get("MODEL_NAME", DEFAULT_MODEL_NAME)
+    api_key = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY", "")
+
+    if not api_key:
+        print(
+            "ERROR: Set HF_TOKEN (preferred) or OPENAI_API_KEY before running inference.py.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    os.environ["API_BASE_URL"] = api_base_url
+    os.environ["MODEL_NAME"] = model_name
+    return OpenAI(base_url=api_base_url, api_key=api_key)
 
 
 def extract_sql(text: str) -> str | None:
@@ -106,7 +162,13 @@ def build_system_prompt(schema: str) -> str:
     )
 
 
-def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
+def run_task(
+    env: SqlAnalystEnvironment,
+    client: OpenAI,
+    model_name: str,
+    task_id: int,
+    max_steps: int,
+) -> float:
     """Run one task and return the final reward."""
     print(f"\n{'='*60}")
     print(f"TASK {task_id}")
@@ -125,20 +187,22 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
         {"role": "user", "content": f"TASK:\n{task_desc}\n\nStart by writing a SQL query to explore the relevant data."},
     ]
 
-    for step in range(1, MAX_STEPS_PER_TASK + 1):
-        print(f"\n  Step {step}/{MAX_STEPS_PER_TASK} (queries so far: {queries_run})...")
+    force_submit_step = min(DEFAULT_FORCE_SUBMIT_STEP, max_steps)
+
+    for step in range(1, max_steps + 1):
+        print(f"\n  Step {step}/{max_steps} (queries so far: {queries_run})...")
 
         try:
             # Build API params — reasoning models (o1/o3/gpt-5.x) don't support temperature
             api_params = {
-                "model": MODEL_NAME,
+                "model": model_name,
                 "messages": messages,
                 "max_completion_tokens": 2048,
             }
-            model_lower = MODEL_NAME.lower()
+            model_lower = model_name.lower()
             is_reasoning = any(x in model_lower for x in ["o1", "o3", "gpt-5"])
             if not is_reasoning:
-                api_params["temperature"] = 0.1
+                api_params["temperature"] = 0.0
 
             response = client.chat.completions.create(**api_params)
             llm_text = response.choices[0].message.content or ""
@@ -194,7 +258,7 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
             continue
 
         # No SQL and no answer — nudge the model
-        if step >= FORCE_SUBMIT_STEP:
+        if step >= force_submit_step:
             print(f"  Force-submitting at step {step}...")
             obs = env.step(SqlAnalystAction(action_type="submit_answer", content=llm_text))
             print(f"  Reward: {obs.reward}")
@@ -214,17 +278,37 @@ def run_task(env: SqlAnalystEnvironment, task_id: int) -> float:
 
 
 def main():
-    """Run all 3 tasks and report scores."""
+    """Run the baseline over the requested tasks and report scores."""
+    args = parse_args()
+    task_ids = parse_task_ids(args.tasks)
+    client = build_client()
+    model_name = os.environ["MODEL_NAME"]
     start_time = time.time()
 
     env = SqlAnalystEnvironment()
     scores = {}
 
-    for task_id in [1, 2, 3, 4, 5]:
-        reward = run_task(env, task_id)
+    print("Running baseline with configuration:")
+    print(f"  API_BASE_URL: {os.environ['API_BASE_URL']}")
+    print(f"  MODEL_NAME:   {model_name}")
+    print(f"  TASK_IDS:     {task_ids}")
+    print(f"  MAX_STEPS:    {args.max_steps}")
+
+    for task_id in task_ids:
+        reward = run_task(env, client, model_name, task_id, args.max_steps)
         scores[f"task_{task_id}"] = reward
 
+    env.close()
     elapsed = time.time() - start_time
+    average = sum(scores.values()) / len(scores)
+    summary = {
+        "model_name": model_name,
+        "api_base_url": os.environ["API_BASE_URL"],
+        "task_ids": task_ids,
+        "scores": scores,
+        "average": round(average, 4),
+        "elapsed_seconds": round(elapsed, 2),
+    }
 
     print(f"\n{'='*60}")
     print("FINAL SCORES")
@@ -232,11 +316,15 @@ def main():
     for task, score in scores.items():
         print(f"  {task}: {score:.4f}")
     total = sum(scores.values())
-    avg = total / len(scores)
     print(f"  Total:  {total:.4f}")
-    print(f"  Average: {avg:.4f}")
+    print(f"  Average: {average:.4f}")
     print(f"  Time:   {elapsed:.1f}s")
     print(f"{'='*60}")
+
+    if args.summary_path:
+        with open(args.summary_path, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2)
+        print(f"Summary written to {args.summary_path}")
 
 
 if __name__ == "__main__":

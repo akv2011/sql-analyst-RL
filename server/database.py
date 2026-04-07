@@ -106,7 +106,7 @@ def create_database() -> Tuple[sqlite3.Connection, Dict[str, Any]]:
 
     Returns:
         (connection, ground_truth) where ground_truth contains precomputed
-        answers for all 3 tasks.
+        answers for all 5 tasks.
     """
     rng = random.Random(SEED)
     conn = sqlite3.connect(":memory:", check_same_thread=False)
